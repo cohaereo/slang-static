@@ -120,8 +120,8 @@ jobs:
 
           cmake "${cmake_args[@]}"
 
-          cmake --build --config releaseWithDebugInfo
-          cmake --build --config minSizeRel
+          cmake --build --preset releaseWithDebugInfo
+          cmake --build --preset minSizeRel
 
       - name: Package build directories
         shell: bash
