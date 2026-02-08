@@ -1,0 +1,214 @@
+name: Build Slang (Static)
+
+on:
+  workflow_dispatch:
+    inputs:
+      slang_tag:
+        description: "Slang tag to build"
+        required: false
+        default: "v2026.1.2"
+
+env:
+  SLANG_TAG: ${{ github.event.inputs.slang_tag }}
+
+jobs:
+  build:
+    name: Build (${{ matrix.os_label }} / ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            os_label: linux
+            arch: x86_64
+          - runner: ubuntu-latest
+            os_label: linux
+            arch: aarch64
+
+          - runner: macos-latest
+            os_label: macos
+            arch: x86_64
+          - runner: macos-latest
+            os_label: macos
+            arch: aarch64
+
+          - runner: windows-latest
+            os_label: windows
+            arch: x86_64
+          - runner: windows-latest
+            os_label: windows
+            arch: aarch64
+
+    env:
+      TAG: ${{ env.SLANG_TAG }}
+      ARCH: ${{ matrix.arch }}
+      OS_LABEL: ${{ matrix.os_label }}
+
+      SLANG_CMAKE_FLAGS: >
+        -DSLANG_LIB_TYPE=STATIC
+        -DSLANG_ENABLE_GFX=FALSE
+        -DSLANG_ENABLE_SLANGD=FALSE
+        -DSLANG_ENABLE_SLANGC=TRUE
+        -DSLANG_ENABLE_SLANGI=FALSE
+        -DSLANG_ENABLE_SLANGRT=FALSE
+        -DSLANG_ENABLE_SLANG_GLSLANG=FALSE
+        -DSLANG_ENABLE_TESTS=FALSE
+        -DSLANG_ENABLE_EXAMPLES=FALSE
+        -DSLANG_ENABLE_CUDA=FALSE
+        -DSLANG_ENABLE_OPTIX=FALSE
+        -DSLANG_ENABLE_NVAPI=FALSE
+        -DSLANG_ENABLE_AFTERMATH=FALSE
+        -DSLANG_ENABLE_XLIB=FALSE
+        -DSLANG_ENABLE_SLANG_RHI=FALSE
+        -DSLANG_ENABLE_RELEASE_DEBUG_INFO=OFF
+        -DSLANG_EMBED_CORE_MODULE_SOURCE=OFF
+        -DSLANG_ENABLE_RELEASE_LTO=ON
+
+    steps:
+      - name: Checkout slang
+        uses: actions/checkout@v4
+        with:
+          repository: shader-slang/slang
+          ref: ${{ env.TAG }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install dependencies + sccache
+        shell: bash
+        run: |
+          set -eux
+          if [ "$OS_LABEL" = "linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y \
+              cmake ninja-build python3 zip unzip git build-essential sccache
+          elif [ "$OS_LABEL" = "macos" ]; then
+            brew update
+            brew install cmake ninja python3 sccache zip
+          else
+            choco install -y cmake --installargs 'ADD_CMAKE_TO_PATH=System'
+            choco install -y ninja python3 sccache zip
+          fi
+
+      - name: Configure sccache
+        shell: bash
+        run: |
+          set -eux
+          sccache --version || true
+          sccache --zero-stats || true
+
+          echo "CMAKE_C_COMPILER_LAUNCHER=sccache" >> $GITHUB_ENV
+          echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache" >> $GITHUB_ENV
+
+      - name: Build & package
+        shell: bash
+        run: |
+          set -eux
+
+          build_one() {
+            local preset="$1"
+            local cmake_type="$2"
+            local debug_suffix="$3"
+            local extra_flags="$4"
+
+            build_dir="build-${preset}-${OS_LABEL}-${ARCH}"
+            pkg_dir="package-${preset}-${OS_LABEL}-${ARCH}"
+
+            rm -rf "$build_dir" "$pkg_dir"
+            mkdir -p "$build_dir" "$pkg_dir/bin" "$pkg_dir/lib" "$pkg_dir/include"
+
+            cmake_args=(
+              -S .
+              -B "$build_dir"
+              -G Ninja
+              $SLANG_CMAKE_FLAGS
+              -DCMAKE_BUILD_TYPE="$cmake_type"
+              $extra_flags
+            )
+
+            if [ "$OS_LABEL" = "windows" ]; then
+              if [ "$ARCH" = "aarch64" ]; then
+                cmake_args+=(-A ARM64)
+              else
+                cmake_args+=(-A x64)
+              fi
+            elif [ "$OS_LABEL" = "macos" ]; then
+              if [ "$ARCH" = "aarch64" ]; then
+                cmake_args+=(-DCMAKE_OSX_ARCHITECTURES=arm64)
+              else
+                cmake_args+=(-DCMAKE_OSX_ARCHITECTURES=x86_64)
+              fi
+            fi
+
+            cmake "${cmake_args[@]}"
+            cmake --build "$build_dir" -- -j$(nproc 2>/dev/null || echo 2)
+
+            cp -r "$build_dir"/bin/* "$pkg_dir/bin" 2>/dev/null || true
+            cp -r "$build_dir"/lib/* "$pkg_dir/lib" 2>/dev/null || true
+            cp -r "$build_dir"/include/* "$pkg_dir/include" 2>/dev/null || true
+            cp -r "$build_dir"/Release/bin/* "$pkg_dir/bin" 2>/dev/null || true
+            cp -r "$build_dir"/Release/lib/* "$pkg_dir/lib" 2>/dev/null || true
+
+            zip_name="slang-${TAG}-${OS_LABEL}-${ARCH}${debug_suffix}.zip"
+            (cd "$pkg_dir" && zip -r "../$zip_name" .)
+          }
+
+          # releaseWithDebugInfo → RelWithDebInfo + debug info
+          build_one \
+            releaseWithDebugInfo \
+            RelWithDebInfo \
+            -debug-info \
+            "-DSLANG_ENABLE_RELEASE_DEBUG_INFO=ON"
+
+          # minSizeRel → MinSizeRel
+          build_one \
+            minSizeRel \
+            MinSizeRel \
+            "" \
+            "-DSLANG_ENABLE_RELEASE_DEBUG_INFO=OFF"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: slang-${{ env.TAG }}-${{ matrix.os_label }}-${{ matrix.arch }}
+          path: |
+            slang-${{ env.TAG }}-${{ matrix.os_label }}-${{ matrix.arch }}.zip
+            slang-${{ env.TAG }}-${{ matrix.os_label }}-${{ matrix.arch }}-debug-info.zip
+
+  publish:
+    name: Publish GitHub release
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        id: release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ env.SLANG_TAG }}
+          release_name: Slang ${{ env.SLANG_TAG }} (static)
+          draft: false
+          prerelease: false
+
+      - name: Upload release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eux
+          for f in artifacts/**/*.zip; do
+            name=$(basename "$f")
+            curl -sS \
+              -X POST \
+              -H "Authorization: token $GITHUB_TOKEN" \
+              -H "Content-Type: application/zip" \
+              --data-binary @"$f" \
+              "https://uploads.github.com/repos/${{ github.repository }}/releases/${{ steps.release.outputs.id }}/assets?name=$name"
+          done
