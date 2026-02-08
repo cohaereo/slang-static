@@ -37,9 +37,9 @@ jobs:
           - runner: windows-latest
             os_label: windows
             arch: x86_64
-          - runner: windows-latest
-            os_label: windows
-            arch: aarch64
+          # - runner: windows-latest
+          #   os_label: windows
+          #   arch: aarch64
 
     env:
       TAG: ${{ github.event.inputs.slang_tag }}
