@@ -45,6 +45,7 @@ jobs:
       TAG: ${{ github.event.inputs.slang_tag }}
       OS_LABEL: ${{ matrix.os_label }}
       ARCH: ${{ matrix.arch }}
+      SCCACHE_GHA_ENABLED: "true"
 
       SLANG_CMAKE_FLAGS: >
         -DSLANG_LIB_TYPE=STATIC
@@ -64,8 +65,13 @@ jobs:
         -DSLANG_ENABLE_SLANG_RHI=FALSE
         -DSLANG_EMBED_CORE_MODULE_SOURCE=OFF
         -DSLANG_ENABLE_RELEASE_LTO=ON
+        -DCMAKE_C_COMPILER_LAUNCHER=sccache
+        -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
     steps:
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
       - name: Checkout slang
         uses: actions/checkout@v4
         with:
@@ -90,82 +96,64 @@ jobs:
             choco install -y ninja python3 sccache zip
           fi
 
-      - name: Configure sccache
-        shell: bash
-        run: |
-          set -eux
-          sccache --version || true
-          sccache --zero-stats || true
-          echo "CMAKE_C_COMPILER_LAUNCHER=sccache" >> $GITHUB_ENV
-          echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache" >> $GITHUB_ENV
-
-      - name: Build & package
+      - name: Build
         shell: bash
         run: |
           set -eux
 
-          build_one() {
-            local preset="$1"
-            local cmake_type="$2"
-            local suffix="$3"
-            local debug_flag="$4"
+          rm -rf "build"
 
-            local build_dir="build-${preset}-${OS_LABEL}-${ARCH}"
-            local install_dir="install-${preset}-${OS_LABEL}-${ARCH}"
+          cmake_args=(-S . -B "build")
 
-            rm -rf "$build_dir" "$install_dir"
-
-            cmake_args=(-S . -B "$build_dir")
-
-            if [ "$OS_LABEL" = "windows" ]; then
-              cmake_args+=(-G "Visual Studio 17 2022")
-              if [ "$ARCH" = "aarch64" ]; then
-                cmake_args+=(-A ARM64)
-              else
-                cmake_args+=(-A x64)
-              fi
+          if [ "$OS_LABEL" = "windows" ]; then
+            cmake_args+=(-G "Visual Studio 17 2022")
+            if [ "$ARCH" = "aarch64" ]; then
+              cmake_args+=(-A ARM64)
             else
-              cmake_args+=(-G Ninja)
+              cmake_args+=(-A x64)
             fi
+          else
+            cmake_args+=(-G Ninja)
+          fi
 
-            cmake_args+=(
-              $SLANG_CMAKE_FLAGS
-              -DCMAKE_BUILD_TYPE="$cmake_type"
-              "$debug_flag"
-            )
+          cmake_args+=($SLANG_CMAKE_FLAGS)
 
-            cmake "${cmake_args[@]}"
-            cmake --build "$build_dir" --config "$cmake_type"
+          cmake "${cmake_args[@]}"
 
-            cmake --install "$build_dir" \
-              --config "$cmake_type" \
-              --prefix "$install_dir"
+          cmake --build --config releaseWithDebugInfo
+          cmake --build --config minSizeRel
 
-            zip_name="slang-${TAG}-${OS_LABEL}-${ARCH}${suffix}.zip"
-            (cd "$install_dir" && zip -r "../$zip_name" .)
-          }
+      - name: Package build directories
+        shell: bash
+        run: |
+          set -eux
 
-          # RelWithDebInfo (debug info enabled)
-          build_one \
-            releaseWithDebugInfo \
-            RelWithDebInfo \
-            -debug-info \
-            -DSLANG_ENABLE_RELEASE_DEBUG_INFO=ON
+          debug_dir="build/RelWithDebInfo"
+          release_dir="build/MinSizeRel"
 
-          # MinSizeRel
-          build_one \
-            minSizeRel \
-            MinSizeRel \
-            "" \
-            -DSLANG_ENABLE_RELEASE_DEBUG_INFO=OFF
+          if [ ! -d "$debug_dir" ] || [ ! -d "$release_dir" ]; then
+            echo "Expected build directories not found!"
+            ls -l "build"
+            exit 1
+          fi
 
-      - name: Upload artifacts
+          zip_debug="slang-${TAG}-${OS_LABEL}-${ARCH}-debug-info.zip"
+          zip_release="slang-${TAG}-${OS_LABEL}-${ARCH}.zip"
+
+          (cd "$debug_dir" && zip -r "../../$zip_debug" .)
+          (cd "$release_dir" && zip -r "../../$zip_release" .)
+
+      - name: Upload MinSizeRel artifact
         uses: actions/upload-artifact@v4
         with:
           name: slang-${{ env.TAG }}-${{ matrix.os_label }}-${{ matrix.arch }}
-          path: |
-            slang-${{ env.TAG }}-${{ matrix.os_label }}-${{ matrix.arch }}.zip
-            slang-${{ env.TAG }}-${{ matrix.os_label }}-${{ matrix.arch }}-debug-info.zip
+          path: slang-${{ env.TAG }}-${{ matrix.os_label }}-${{ matrix.arch }}.zip
+
+      - name: Upload RelWithDebInfo artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: slang-${{ env.TAG }}-${{ matrix.os_label }}-${{ matrix.arch }}-debug-info
+          path: slang-${{ env.TAG }}-${{ matrix.os_label }}-${{ matrix.arch }}-debug-info.zip
 
   publish:
     name: Publish GitHub release
