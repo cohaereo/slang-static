@@ -8,9 +8,6 @@ on:
         required: false
         default: "v2026.1.2"
 
-env:
-  SLANG_TAG: ${{ github.event.inputs.slang_tag }}
-
 jobs:
   build:
     name: Build (${{ matrix.os_label }} / ${{ matrix.arch }})
@@ -20,6 +17,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux
           - runner: ubuntu-latest
             os_label: linux
             arch: x86_64
@@ -27,6 +25,7 @@ jobs:
             os_label: linux
             arch: aarch64
 
+          # macOS
           - runner: macos-latest
             os_label: macos
             arch: x86_64
@@ -34,6 +33,7 @@ jobs:
             os_label: macos
             arch: aarch64
 
+          # Windows
           - runner: windows-latest
             os_label: windows
             arch: x86_64
@@ -43,8 +43,8 @@ jobs:
 
     env:
       TAG: ${{ github.event.inputs.slang_tag }}
-      ARCH: ${{ matrix.arch }}
       OS_LABEL: ${{ matrix.os_label }}
+      ARCH: ${{ matrix.arch }}
 
       SLANG_CMAKE_FLAGS: >
         -DSLANG_LIB_TYPE=STATIC
@@ -62,7 +62,6 @@ jobs:
         -DSLANG_ENABLE_AFTERMATH=FALSE
         -DSLANG_ENABLE_XLIB=FALSE
         -DSLANG_ENABLE_SLANG_RHI=FALSE
-        -DSLANG_ENABLE_RELEASE_DEBUG_INFO=OFF
         -DSLANG_EMBED_CORE_MODULE_SOURCE=OFF
         -DSLANG_ENABLE_RELEASE_LTO=ON
 
@@ -97,7 +96,6 @@ jobs:
           set -eux
           sccache --version || true
           sccache --zero-stats || true
-
           echo "CMAKE_C_COMPILER_LAUNCHER=sccache" >> $GITHUB_ENV
           echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache" >> $GITHUB_ENV
 
@@ -109,19 +107,15 @@ jobs:
           build_one() {
             local preset="$1"
             local cmake_type="$2"
-            local debug_suffix="$3"
-            local extra_flags="$4"
+            local suffix="$3"
+            local debug_flag="$4"
 
-            build_dir="build-${preset}-${OS_LABEL}-${ARCH}"
-            pkg_dir="package-${preset}-${OS_LABEL}-${ARCH}"
+            local build_dir="build-${preset}-${OS_LABEL}-${ARCH}"
+            local install_dir="install-${preset}-${OS_LABEL}-${ARCH}"
 
-            rm -rf "$build_dir" "$pkg_dir"
-            mkdir -p "$build_dir" "$pkg_dir/bin" "$pkg_dir/lib" "$pkg_dir/include"
+            rm -rf "$build_dir" "$install_dir"
 
-            cmake_args=(
-              -S .
-              -B "$build_dir"
-            )
+            cmake_args=(-S . -B "$build_dir")
 
             if [ "$OS_LABEL" = "windows" ]; then
               cmake_args+=(-G "Visual Studio 17 2022")
@@ -134,32 +128,36 @@ jobs:
               cmake_args+=(-G Ninja)
             fi
 
+            cmake_args+=(
+              $SLANG_CMAKE_FLAGS
+              -DCMAKE_BUILD_TYPE="$cmake_type"
+              "$debug_flag"
+            )
+
             cmake "${cmake_args[@]}"
-            cmake --build "$build_dir" -- -j$(nproc 2>/dev/null || echo 2)
+            cmake --build "$build_dir" --config "$cmake_type"
 
-            cp -r "$build_dir"/bin/* "$pkg_dir/bin" 2>/dev/null || true
-            cp -r "$build_dir"/lib/* "$pkg_dir/lib" 2>/dev/null || true
-            cp -r "$build_dir"/include/* "$pkg_dir/include" 2>/dev/null || true
-            cp -r "$build_dir"/Release/bin/* "$pkg_dir/bin" 2>/dev/null || true
-            cp -r "$build_dir"/Release/lib/* "$pkg_dir/lib" 2>/dev/null || true
+            cmake --install "$build_dir" \
+              --config "$cmake_type" \
+              --prefix "$install_dir"
 
-            zip_name="slang-${TAG}-${OS_LABEL}-${ARCH}${debug_suffix}.zip"
-            (cd "$pkg_dir" && zip -r "../$zip_name" .)
+            zip_name="slang-${TAG}-${OS_LABEL}-${ARCH}${suffix}.zip"
+            (cd "$install_dir" && zip -r "../$zip_name" .)
           }
 
-          # releaseWithDebugInfo → RelWithDebInfo + debug info
+          # RelWithDebInfo (debug info enabled)
           build_one \
             releaseWithDebugInfo \
             RelWithDebInfo \
             -debug-info \
-            "-DSLANG_ENABLE_RELEASE_DEBUG_INFO=ON"
+            -DSLANG_ENABLE_RELEASE_DEBUG_INFO=ON
 
-          # minSizeRel → MinSizeRel
+          # MinSizeRel
           build_one \
             minSizeRel \
             MinSizeRel \
             "" \
-            "-DSLANG_ENABLE_RELEASE_DEBUG_INFO=OFF"
+            -DSLANG_ENABLE_RELEASE_DEBUG_INFO=OFF
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -186,14 +184,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ env.SLANG_TAG }}
-          release_name: Slang ${{ env.SLANG_TAG }} (static)
+          tag_name: ${{ github.event.inputs.slang_tag }}
+          release_name: Slang ${{ github.event.inputs.slang_tag }} (static)
           draft: false
           prerelease: false
 
       - name: Upload release assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
           set -eux
           for f in artifacts/**/*.zip; do
