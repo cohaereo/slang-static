@@ -121,24 +121,17 @@ jobs:
             cmake_args=(
               -S .
               -B "$build_dir"
-              -G Ninja
-              $SLANG_CMAKE_FLAGS
-              -DCMAKE_BUILD_TYPE="$cmake_type"
-              $extra_flags
             )
 
             if [ "$OS_LABEL" = "windows" ]; then
+              cmake_args+=(-G "Visual Studio 17 2022")
               if [ "$ARCH" = "aarch64" ]; then
                 cmake_args+=(-A ARM64)
               else
                 cmake_args+=(-A x64)
               fi
-            elif [ "$OS_LABEL" = "macos" ]; then
-              if [ "$ARCH" = "aarch64" ]; then
-                cmake_args+=(-DCMAKE_OSX_ARCHITECTURES=arm64)
-              else
-                cmake_args+=(-DCMAKE_OSX_ARCHITECTURES=x86_64)
-              fi
+            else
+              cmake_args+=(-G Ninja)
             fi
 
             cmake "${cmake_args[@]}"
