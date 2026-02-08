@@ -42,7 +42,7 @@ jobs:
             arch: aarch64
 
     env:
-      TAG: ${{ env.SLANG_TAG }}
+      TAG: ${{ github.event.inputs.slang_tag }}
       ARCH: ${{ matrix.arch }}
       OS_LABEL: ${{ matrix.os_label }}
 
